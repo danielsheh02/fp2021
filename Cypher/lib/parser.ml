@@ -14,7 +14,27 @@ let pspace = take_while (fun ch -> ch = ' ' || ch = '\n')
 let pspaces p = pspace *> p <* pspace
 let pspaceschar chr = pspaces (char chr)
 let pspacesstring str = pspaces (string_ci str)
-let pstring = pspaceschar '"' *> take_till (fun ch -> ch = '"') <* pspaceschar '"'
+
+let pid =
+  pspaces
+    (take_while1 (fun ch ->
+         (ch >= '0' && ch <= '9')
+         || (ch >= 'a' && ch <= 'z')
+         || (ch >= 'A' && ch <= 'Z')
+         || ch = '_'))
+;;
+
+let pidwithoutnumbs =
+  pspaces
+    (take_while1 (fun ch ->
+         (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch = '_'))
+;;
+
+let pcsring =
+  pspaceschar '"' *> take_till (fun ch -> ch = '"')
+  <* pspaceschar '"'
+  >>| fun c -> CString c
+;;
 
 let is_digit = function
   | '0' .. '9' -> true
@@ -38,13 +58,22 @@ let pcint =
        | None -> fail "incorrect int"))
 ;;
 
-let pcsring = pstring >>| fun s -> CString s
 let pconst = choice [ pcsring; pcint ]
 let peconst = pconst >>| fun c -> EConst c
+let pgetelm = pidwithoutnumbs >>| fun var -> EGetElm var
+
+let pgetprop =
+  lift2
+    (fun varelm varprop -> EGetProp (varelm, varprop))
+    (pidwithoutnumbs <* pspaceschar '.')
+    pidwithoutnumbs
+;;
+
+let pegetelmorprop = choice [ pgetprop; pgetelm ]
 
 let pexpr =
   fix (fun pexpr ->
-      let term = char '(' *> pexpr <* char ')' <|> peconst in
+      let term = choice [ char '(' *> pexpr <* char ')'; peconst; pegetelmorprop ] in
       let term =
         chainl1
           term
@@ -59,6 +88,26 @@ let pexpr =
           (choice
              [ char '+' *> return (fun e1 e2 -> EBinop (Plus, e1, e2))
              ; char '-' *> return (fun e1 e2 -> EBinop (Minus, e1, e2))
+             ])
+      in
+      let term =
+        chainl1
+          term
+          (choice
+             [ string "<>" *> return (fun e1 e2 -> EBinop (NotEqual, e1, e2))
+             ; char '<' *> return (fun e1 e2 -> EBinop (Less, e1, e2))
+             ; char '>' *> return (fun e1 e2 -> EBinop (Greater, e1, e2))
+             ; string "<=" *> return (fun e1 e2 -> EBinop (LessEq, e1, e2))
+             ; string ">=" *> return (fun e1 e2 -> EBinop (GreEq, e1, e2))
+             ; char '=' *> return (fun e1 e2 -> EBinop (Equal, e1, e2))
+             ])
+      in
+      let term =
+        chainl1
+          term
+          (choice
+             [ string_ci "AND" *> return (fun e1 e2 -> EBinop (And, e1, e2))
+             ; string_ci "OR" *> return (fun e1 e2 -> EBinop (Or, e1, e2))
              ])
       in
       term)
@@ -79,15 +128,6 @@ let pproperties =
      | [] -> None
      | _ -> Some props)
   <* pspaceschar '}'
-;;
-
-let pid =
-  pspaces
-    (take_while1 (fun ch ->
-         (ch >= '0' && ch <= '9')
-         || (ch >= 'a' && ch <= 'z')
-         || (ch >= 'A' && ch <= 'Z')
-         || ch = '_'))
 ;;
 
 let pids = sep_by (pspaceschar ':') pid
@@ -133,7 +173,8 @@ let pelms = sep_by (pspaceschar ',') pelm
 let pcreate = pspacesstring "CREATE" *> pelms >>| fun cmd -> CmdCreate cmd
 let pvar = pid
 let pvars = sep_by (pspaceschar ',') pvar
-let pmatchret = pspacesstring "RETURN" *> pvars >>| fun vars -> CMatchRet vars
+let pexprs = sep_by (pspaceschar ',') pexpr
+let pmatchret = pspacesstring "RETURN" *> pexprs >>| fun exprs -> CMatchRet exprs
 let pmatchcreate = pspacesstring "CREATE" *> pelms >>| fun cmd -> CMatchCrt cmd
 
 let pmatchdelete =
@@ -142,7 +183,16 @@ let pmatchdelete =
 ;;
 
 let pcmd = choice [ pmatchret; pmatchcreate; pmatchdelete ]
-let pcmdsmatch = lift2 (fun elm cmdmatch -> CmdMatch (elm, cmdmatch)) pelms (many1 pcmd)
+let pwhere = pspacesstring "WHERE" *> pexpr >>| fun expr -> CMatchWhere expr
+
+let pcmdsmatch =
+  lift3
+    (fun elm cmdwhere cmdmatch -> CmdMatch (elm, cmdwhere, cmdmatch))
+    pelms
+    (option None (pwhere >>| fun cmd -> Some cmd))
+    (many1 pcmd)
+;;
+
 let pmatch = pspacesstring "MATCH" *> pcmdsmatch
 let pcmds = choice [ pcreate; pmatch ] <* pspaceschar ';'
 let pcmdssep = many pcmds
