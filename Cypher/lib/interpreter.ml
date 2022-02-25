@@ -858,13 +858,23 @@ let sep_env varelm env =
   | false -> Result.error (NotBound "Undefined variable or nothing was found.")
 ;;
 
-(**
-"Failwith" in this function is written to get rid of the warning. 
-The code won't get here. In the case of "IncorrectType", 
-the program will stop using "Result.error". 
-But this will not happen either, since only 3 types described 
-below are supported at the parsing stage.
-*)
+let sort_props cond field =
+  List.stable_sort (fun elm1 elm2 ->
+      match elm1, elm2 with
+      | (_, ((_, _, props1), (_, _))), (_, ((_, _, props2), (_, _))) ->
+        (match List.assoc_opt field props1, List.assoc_opt field props2 with
+        | Some field1, Some field2 -> cond * compare field1 field2
+        | Some _, None -> cond
+        | None, Some _ -> cond
+        | None, None -> 0))
+;;
+
+let sort_id cond =
+  List.stable_sort (fun elm1 elm2 ->
+      match elm1, elm2 with
+      | (_, ((id1, _, _), (_, _))), (_, ((id2, _, _), (_, _))) -> cond * compare id1 id2)
+;;
+
 let sort_env expr env cond =
   let* listorder, listdef =
     match expr with
@@ -873,22 +883,12 @@ let sort_env expr env cond =
     | EGetElm varelm -> sep_env varelm env
     | _ -> Result.error IncorrectType
   in
-  let newlistorder =
-    List.stable_sort
-      (fun elm1 elm2 ->
-        match elm1, elm2 with
-        | (_, ((id1, _, props1), (_, _))), (_, ((id2, _, props2), (_, _))) ->
-          (match expr with
-          | EGetProp (_, field) ->
-            (match List.assoc_opt field props1, List.assoc_opt field props2 with
-            | Some field1, Some field2 -> cond * compare field1 field2
-            | Some _, None -> cond
-            | None, Some _ -> cond
-            | None, None -> 0)
-          | EGetElm _ -> cond * compare id1 id2
-          | EGetId _ -> cond * compare id1 id2
-          | _ -> failwith "Incorrect type"))
-      listorder
+  let* newlistorder =
+    match expr with
+    | EGetProp (_, field) -> Result.ok (sort_props cond field listorder)
+    | EGetElm _ -> Result.ok (sort_id cond listorder)
+    | EGetId _ -> Result.ok (sort_id cond listorder)
+    | _ -> Result.error IncorrectType
   in
   Result.ok (newlistorder @ listdef)
 ;;
